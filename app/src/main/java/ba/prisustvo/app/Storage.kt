@@ -18,7 +18,9 @@ class AttendanceStore(context: Context) {
                 .put("year", c.year)
 
             val students = JSONArray()
-            c.students.forEach { students.put(JSONObject().put("id", it.id).put("name", it.name)) }
+            c.students.forEach {
+                students.put(JSONObject().put("id", it.id).put("name", it.name).put("active", it.active))
+            }
             obj.put("students", students)
 
             val sessions = JSONArray()
@@ -37,7 +39,7 @@ class AttendanceStore(context: Context) {
             c.attendance.forEach { (key, entry) ->
                 attendance.put(
                     key,
-                    JSONObject().put("status", entry.status).put("comment", entry.comment)
+                    JSONObject().put("status", normalizeStatus(entry.status)).put("comment", entry.comment)
                 )
             }
             obj.put("attendanceV2", attendance)
@@ -48,7 +50,11 @@ class AttendanceStore(context: Context) {
 
     fun load(): List<Classroom> {
         val v2 = prefs.getString("data_v2", null)
-        if (!v2.isNullOrBlank()) return parseV2(v2)
+        if (!v2.isNullOrBlank()) {
+            val parsed = parseV2(v2)
+            save(parsed)
+            return parsed
+        }
         val migrated = migrateLegacy(prefs.getString("data", "[]") ?: "[]")
         if (migrated.isNotEmpty()) save(migrated)
         return migrated
@@ -62,6 +68,8 @@ class AttendanceStore(context: Context) {
         return text
     }
 
+    private fun normalizeStatus(status: String): String = if (status == "R") STATUS_PRESENT else status
+
     private fun parseV2(text: String): List<Classroom> = try {
         val root = JSONArray(text)
         buildList {
@@ -71,7 +79,7 @@ class AttendanceStore(context: Context) {
                 val students = buildList {
                     for (s in 0 until studentsJson.length()) {
                         val st = studentsJson.getJSONObject(s)
-                        add(Student(st.getString("id"), st.getString("name")))
+                        add(Student(st.getString("id"), st.getString("name"), st.optBoolean("active", true)))
                     }
                 }
                 val sessionsJson = obj.optJSONArray("sessions") ?: JSONArray()
@@ -93,7 +101,7 @@ class AttendanceStore(context: Context) {
                 attendanceJson.keys().forEach { key ->
                     val entry = attendanceJson.optJSONObject(key)
                     if (entry != null) {
-                        attendance[key] = AttendanceEntry(entry.optString("status"), entry.optString("comment"))
+                        attendance[key] = AttendanceEntry(normalizeStatus(entry.optString("status")), entry.optString("comment"))
                     }
                 }
                 add(
@@ -122,7 +130,7 @@ class AttendanceStore(context: Context) {
                 val students = buildList {
                     for (s in 0 until studentsJson.length()) {
                         val st = studentsJson.getJSONObject(s)
-                        add(Student(st.getString("id"), st.getString("name")))
+                        add(Student(st.getString("id"), st.getString("name"), true))
                     }
                 }
                 val datesObj = obj.optJSONObject("dates") ?: JSONObject()
@@ -147,7 +155,7 @@ class AttendanceStore(context: Context) {
                             sessions += SessionRecord(id, week, 1, "")
                             id
                         }
-                        attendance[sessionKey(sessionId, studentId)] = AttendanceEntry(attendanceObj.optString(oldKey), "")
+                        attendance[sessionKey(sessionId, studentId)] = AttendanceEntry(normalizeStatus(attendanceObj.optString(oldKey)), "")
                     }
                 }
                 add(
