@@ -5,24 +5,27 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
+import java.time.temporal.ChronoUnit
 
 const val STATUS_PRESENT = "P"
 const val STATUS_ABSENT = "A"
 const val STATUS_EXCUSED = "O"
 const val STATUS_UNEXCUSED = "N"
 const val STATUS_LATE = "K"
-const val STATUS_LEFT_EARLY = "R"
 
 val ALL_STATUSES = listOf(
     STATUS_PRESENT,
     STATUS_ABSENT,
     STATUS_EXCUSED,
     STATUS_UNEXCUSED,
-    STATUS_LATE,
-    STATUS_LEFT_EARLY
+    STATUS_LATE
 )
 
-data class Student(val id: String, val name: String)
+data class Student(
+    val id: String,
+    val name: String,
+    val active: Boolean = true
+)
 
 data class SessionRecord(
     val id: String,
@@ -52,10 +55,9 @@ data class StudentStats(
     val absent: Int = 0,
     val excused: Int = 0,
     val unexcused: Int = 0,
-    val late: Int = 0,
-    val leftEarly: Int = 0
+    val late: Int = 0
 ) {
-    val attended: Int get() = present + late + leftEarly
+    val attended: Int get() = present + late
     val totalAbsences: Int get() = absent + excused + unexcused
     val attendancePercent: Int
         get() = if (recorded == 0) 0 else ((attended * 100.0) / recorded).toInt()
@@ -81,7 +83,6 @@ fun statusLabel(status: String): String = when (status) {
     STATUS_EXCUSED -> "Opravdano odsutan"
     STATUS_UNEXCUSED -> "Neopravdano odsutan"
     STATUS_LATE -> "Kasnio"
-    STATUS_LEFT_EARLY -> "Izašao ranije"
     else -> "Nije evidentirano"
 }
 
@@ -91,7 +92,6 @@ fun statusShortLabel(status: String): String = when (status) {
     STATUS_EXCUSED -> "O"
     STATUS_UNEXCUSED -> "N"
     STATUS_LATE -> "K"
-    STATUS_LEFT_EARLY -> "R"
     else -> "?"
 }
 
@@ -106,8 +106,7 @@ fun Classroom.statsFor(studentId: String): StudentStats {
             absent = result.absent + if (status == STATUS_ABSENT) 1 else 0,
             excused = result.excused + if (status == STATUS_EXCUSED) 1 else 0,
             unexcused = result.unexcused + if (status == STATUS_UNEXCUSED) 1 else 0,
-            late = result.late + if (status == STATUS_LATE) 1 else 0,
-            leftEarly = result.leftEarly + if (status == STATUS_LEFT_EARLY) 1 else 0
+            late = result.late + if (status == STATUS_LATE) 1 else 0
         )
     }
     return result
@@ -124,8 +123,7 @@ fun Classroom.sessionStats(sessionId: String): StudentStats {
             absent = result.absent + if (status == STATUS_ABSENT) 1 else 0,
             excused = result.excused + if (status == STATUS_EXCUSED) 1 else 0,
             unexcused = result.unexcused + if (status == STATUS_UNEXCUSED) 1 else 0,
-            late = result.late + if (status == STATUS_LATE) 1 else 0,
-            leftEarly = result.leftEarly + if (status == STATUS_LEFT_EARLY) 1 else 0
+            late = result.late + if (status == STATUS_LATE) 1 else 0
         )
     }
     return result
@@ -135,21 +133,33 @@ fun Classroom.anchorSession(): SessionRecord? = sessions
     .filter { parseAppDate(it.date) != null }
     .minByOrNull { it.week }
 
-fun Classroom.weekRange(week: Int): String {
-    val anchor = anchorSession() ?: return "Datum nije postavljen"
-    val anchorDate = parseAppDate(anchor.date) ?: return "Datum nije postavljen"
+fun Classroom.weekStart(week: Int): LocalDate? {
+    val anchor = anchorSession() ?: return null
+    val anchorDate = parseAppDate(anchor.date) ?: return null
     val anchorMonday = anchorDate.with(DayOfWeek.MONDAY)
-    val monday = anchorMonday.plusWeeks((week - anchor.week).toLong())
+    return anchorMonday.plusWeeks((week - anchor.week).toLong())
+}
+
+fun Classroom.weekRange(week: Int): String {
+    val monday = weekStart(week) ?: return "Datum nije postavljen"
     val friday = monday.plusDays(4)
     return "${monday.format(DateTimeFormatter.ofPattern("dd.MM."))}–${friday.format(dateFormatter)}"
+}
+
+fun Classroom.currentTeachingWeek(today: LocalDate = LocalDate.now()): Int? {
+    val anchor = anchorSession() ?: return null
+    val anchorDate = parseAppDate(anchor.date) ?: return null
+    val anchorMonday = anchorDate.with(DayOfWeek.MONDAY)
+    val todayMonday = today.with(DayOfWeek.MONDAY)
+    val offset = ChronoUnit.WEEKS.between(anchorMonday, todayMonday).toInt()
+    val week = anchor.week + offset
+    return week.takeIf { it in 1..36 }
 }
 
 fun Classroom.defaultDateForWeek(week: Int): String {
     val existing = sessions.firstOrNull { it.week == week && parseAppDate(it.date) != null }
     if (existing != null) return existing.date
-    val anchor = anchorSession() ?: return formatAppDate(LocalDate.now())
-    val anchorDate = parseAppDate(anchor.date) ?: return formatAppDate(LocalDate.now())
-    val monday = anchorDate.with(DayOfWeek.MONDAY).plusWeeks((week - anchor.week).toLong())
+    val monday = weekStart(week) ?: return formatAppDate(LocalDate.now())
     return formatAppDate(monday)
 }
 
@@ -166,8 +176,7 @@ fun Classroom.monthlyStats(): Map<YearMonth, StudentStats> {
             absent = current.absent + s.absent,
             excused = current.excused + s.excused,
             unexcused = current.unexcused + s.unexcused,
-            late = current.late + s.late,
-            leftEarly = current.leftEarly + s.leftEarly
+            late = current.late + s.late
         )
     }
     return grouped
