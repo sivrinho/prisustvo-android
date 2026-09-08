@@ -31,13 +31,12 @@ object ExportUtils {
             canvas.drawText("Izvještaj prisustva – ${classroom.name}", 30f, y, title); y += 22
             canvas.drawText("${classroom.subject}  •  ${classroom.year}", 30f, y, paint); y += 24
             canvas.drawText("Učenik", 30f, y, bold)
-            canvas.drawText("Evid.", 310f, y, bold)
-            canvas.drawText("Pris.", 355f, y, bold)
-            canvas.drawText("Izost.", 400f, y, bold)
-            canvas.drawText("Oprav.", 455f, y, bold)
-            canvas.drawText("Neopr.", 515f, y, bold)
-            canvas.drawText("Kasnio", 575f, y, bold)
-            canvas.drawText("Ranije", 635f, y, bold)
+            canvas.drawText("Evid.", 330f, y, bold)
+            canvas.drawText("Pris.", 385f, y, bold)
+            canvas.drawText("Izost.", 440f, y, bold)
+            canvas.drawText("Oprav.", 500f, y, bold)
+            canvas.drawText("Neopr.", 565f, y, bold)
+            canvas.drawText("Kasnio", 630f, y, bold)
             canvas.drawText("%", 700f, y, bold)
             y += 16
         }
@@ -53,14 +52,14 @@ object ExportUtils {
                 header()
             }
             val s = classroom.statsFor(student.id)
-            canvas.drawText("${index + 1}. ${student.name}", 30f, y, paint)
-            canvas.drawText(s.recorded.toString(), 315f, y, paint)
-            canvas.drawText(s.attended.toString(), 360f, y, paint)
-            canvas.drawText(s.totalAbsences.toString(), 405f, y, paint)
-            canvas.drawText(s.excused.toString(), 460f, y, paint)
-            canvas.drawText(s.unexcused.toString(), 520f, y, paint)
-            canvas.drawText(s.late.toString(), 580f, y, paint)
-            canvas.drawText(s.leftEarly.toString(), 640f, y, paint)
+            val label = "${index + 1}. ${student.name}${if (!student.active) " (neakt.)" else ""}"
+            canvas.drawText(label.take(46), 30f, y, paint)
+            canvas.drawText(s.recorded.toString(), 335f, y, paint)
+            canvas.drawText(s.attended.toString(), 390f, y, paint)
+            canvas.drawText(s.totalAbsences.toString(), 445f, y, paint)
+            canvas.drawText(s.excused.toString(), 505f, y, paint)
+            canvas.drawText(s.unexcused.toString(), 570f, y, paint)
+            canvas.drawText(s.late.toString(), 635f, y, paint)
             canvas.drawText("${s.attendancePercent}%", 700f, y, paint)
             if (s.warning) canvas.drawText("!", 760f, y, bold)
             y += 15
@@ -83,7 +82,8 @@ object ExportUtils {
         var y = 40f
         val stats = classroom.statsFor(student.id)
         canvas.drawText(student.name, 30f, y, title); y += 22
-        canvas.drawText("${classroom.name} • ${classroom.subject} • ${classroom.year}", 30f, y, paint); y += 22
+        canvas.drawText("${classroom.name} • ${classroom.subject} • ${classroom.year}", 30f, y, paint); y += 18
+        if (!student.active) { canvas.drawText("Status učenika: NEAKTIVAN", 30f, y, bold); y += 18 }
         canvas.drawText("Prisustvo: ${stats.attendancePercent}%  |  Izostanci: ${stats.totalAbsences}  |  Neopravdani: ${stats.unexcused}", 30f, y, bold); y += 25
         classroom.sessions.sortedWith(compareBy<SessionRecord> { it.week }.thenBy { it.lesson }).forEach { session ->
             val entry = classroom.attendance[sessionKey(session.id, student.id)] ?: AttendanceEntry()
@@ -105,10 +105,10 @@ object ExportUtils {
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
         val file = File(dir, "izvjestaj_${safeName(classroom.name)}.csv")
         file.bufferedWriter().use { out ->
-            out.appendLine("Ucenik,Evidentirano,Prisutan,Izostanci,Opravdano,Neopravdano,Kasnio,Izasao ranije,Prisustvo %")
+            out.appendLine("Ucenik,Aktivan,Evidentirano,Prisutan,Izostanci,Opravdano,Neopravdano,Kasnio,Prisustvo %")
             classroom.students.sortedBy { surnameKey(it.name) }.forEach { student ->
                 val s = classroom.statsFor(student.id)
-                out.appendLine(listOf(student.name, s.recorded, s.attended, s.totalAbsences, s.excused, s.unexcused, s.late, s.leftEarly, s.attendancePercent).joinToString(",") { csvEscape(it.toString()) })
+                out.appendLine(listOf(student.name, if (student.active) "DA" else "NE", s.recorded, s.attended, s.totalAbsences, s.excused, s.unexcused, s.late, s.attendancePercent).joinToString(",") { csvEscape(it.toString()) })
             }
         }
         return file
