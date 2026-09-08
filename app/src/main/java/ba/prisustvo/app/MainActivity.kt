@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -20,6 +19,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -73,6 +73,7 @@ private fun PrisustvoRoot(context: Context) {
                         ExportUtils.shareFile(context, file, "application/json", "Sačuvaj / podijeli backup")
                     }
                 )
+
                 profileStudentId != null -> {
                     val classroom = classes[idx]
                     val student = classroom.students.firstOrNull { it.id == profileStudentId }
@@ -86,6 +87,7 @@ private fun PrisustvoRoot(context: Context) {
                         }
                     )
                 }
+
                 showReports -> ReportsScreen(
                     classroom = classes[idx],
                     onBack = { showReports = false },
@@ -99,6 +101,7 @@ private fun PrisustvoRoot(context: Context) {
                         ExportUtils.shareFile(context, file, "text/csv", "Podijeli CSV izvještaj")
                     }
                 )
+
                 selectedSessionId != null -> {
                     val classroom = classes[idx]
                     val session = classroom.sessions.firstOrNull { it.id == selectedSessionId }
@@ -126,7 +129,7 @@ private fun PrisustvoRoot(context: Context) {
                         onAllPresent = {
                             updateClass(idx) { c ->
                                 val map = c.attendance.toMutableMap()
-                                c.students.forEach { student ->
+                                c.students.filter { it.active }.forEach { student ->
                                     val key = sessionKey(session.id, student.id)
                                     val current = map[key] ?: AttendanceEntry()
                                     map[key] = current.copy(status = STATUS_PRESENT)
@@ -137,6 +140,7 @@ private fun PrisustvoRoot(context: Context) {
                         onProfile = { profileStudentId = it; selectedSessionId = null }
                     )
                 }
+
                 else -> ClassroomScreen(
                     classroom = classes[idx],
                     onBack = { classIndex = null },
@@ -148,12 +152,43 @@ private fun PrisustvoRoot(context: Context) {
                         val id = UUID.randomUUID().toString()
                         val session = SessionRecord(id, week, lesson, c.defaultDateForWeek(week))
                         val attendance = c.attendance.toMutableMap()
-                        c.students.forEach { attendance[sessionKey(id, it.id)] = AttendanceEntry(STATUS_PRESENT, "") }
+                        c.students.filter { it.active }.forEach {
+                            attendance[sessionKey(id, it.id)] = AttendanceEntry(STATUS_PRESENT, "")
+                        }
                         updateClass(idx) { it.copy(sessions = it.sessions + session, attendance = attendance) }
                         selectedSessionId = id
                     },
+                    onDeleteSession = { sessionId ->
+                        updateClass(idx) { c ->
+                            c.copy(
+                                sessions = c.sessions.filterNot { it.id == sessionId },
+                                attendance = c.attendance.filterKeys { !it.startsWith("$sessionId|") }
+                            )
+                        }
+                    },
                     onAddStudent = { name ->
-                        updateClass(idx) { it.copy(students = it.students + Student(UUID.randomUUID().toString(), name)) }
+                        updateClass(idx) { it.copy(students = it.students + Student(UUID.randomUUID().toString(), name, true)) }
+                    },
+                    onBulkAdd = { names ->
+                        updateClass(idx) { c ->
+                            val existing = c.students.map { it.name.trim().lowercase() }.toMutableSet()
+                            val additions = names.map { it.trim() }
+                                .filter { it.isNotBlank() }
+                                .distinctBy { it.lowercase() }
+                                .filter { existing.add(it.lowercase()) }
+                                .map { Student(UUID.randomUUID().toString(), it, true) }
+                            c.copy(students = c.students + additions)
+                        }
+                    },
+                    onRenameStudent = { studentId, newName ->
+                        updateClass(idx) { c ->
+                            c.copy(students = c.students.map { if (it.id == studentId) it.copy(name = newName) else it })
+                        }
+                    },
+                    onToggleStudent = { studentId ->
+                        updateClass(idx) { c ->
+                            c.copy(students = c.students.map { if (it.id == studentId) it.copy(active = !it.active) else it })
+                        }
                     },
                     onDeleteStudent = { studentId ->
                         updateClass(idx) { c ->
@@ -204,7 +239,7 @@ private fun HomeScreen(
                             Column(Modifier.weight(1f)) {
                                 Text(c.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                                 Text(listOf(c.subject, c.year).filter { it.isNotBlank() }.joinToString(" • "))
-                                Text("${c.students.size} učenika • ${c.sessions.size} časova", style = MaterialTheme.typography.bodySmall)
+                                Text("${c.students.count { it.active }} aktivnih učenika • ${c.sessions.size} časova", style = MaterialTheme.typography.bodySmall)
                             }
                             TextButton(onClick = { onDelete(index) }) { Text("Obriši") }
                         }
@@ -236,6 +271,8 @@ private fun AddClassDialog(onDismiss: () -> Unit, onAdd: (String, String, String
     )
 }
 
+private enum class StudentFilter { ACTIVE, INACTIVE, ALL }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ClassroomScreen(
@@ -244,19 +281,36 @@ private fun ClassroomScreen(
     onReports: () -> Unit,
     onOpenSession: (String) -> Unit,
     onCreateSession: (Int) -> Unit,
+    onDeleteSession: (String) -> Unit,
     onAddStudent: (String) -> Unit,
+    onBulkAdd: (List<String>) -> Unit,
+    onRenameStudent: (String, String) -> Unit,
+    onToggleStudent: (String) -> Unit,
     onDeleteStudent: (String) -> Unit,
     onStudent: (String) -> Unit
 ) {
     var studentsExpanded by remember { mutableStateOf(false) }
     var addStudent by remember { mutableStateOf(false) }
+    var bulkAdd by remember { mutableStateOf(false) }
+    var renameStudentId by remember { mutableStateOf<String?>(null) }
+    var deleteSessionId by remember { mutableStateOf<String?>(null) }
     var studentSearch by remember { mutableStateOf("") }
     var sortSurname by remember { mutableStateOf(false) }
+    var studentFilter by remember { mutableStateOf(StudentFilter.ACTIVE) }
     var weekSearch by remember { mutableStateOf("") }
+    val currentWeek = classroom.currentTeachingWeek(LocalDate.now())
 
     val students = classroom.students
+        .filter {
+            when (studentFilter) {
+                StudentFilter.ACTIVE -> it.active
+                StudentFilter.INACTIVE -> !it.active
+                StudentFilter.ALL -> true
+            }
+        }
         .filter { it.name.contains(studentSearch, ignoreCase = true) }
         .let { list -> if (sortSurname) list.sortedBy { surnameKey(it.name) } else list }
+
     val weeks = (1..36).filter { w ->
         weekSearch.isBlank() || w.toString().contains(weekSearch) || classroom.weekRange(w).contains(weekSearch, ignoreCase = true) ||
             classroom.sessions.any { it.week == w && it.date.contains(weekSearch, ignoreCase = true) }
@@ -272,40 +326,60 @@ private fun ClassroomScreen(
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth().padding(12.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Učenici (${classroom.students.size})", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text("Učenici (${classroom.students.count { it.active }} aktivnih)", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                             TextButton(onClick = { studentsExpanded = !studentsExpanded }) { Text(if (studentsExpanded) "Sakrij" else "Prikaži") }
-                            Button(onClick = { addStudent = true }, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("+ Učenik") }
                         }
                         if (studentsExpanded) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Button(onClick = { addStudent = true }, modifier = Modifier.weight(1f)) { Text("+ Učenik") }
+                                OutlinedButton(onClick = { bulkAdd = true }, modifier = Modifier.weight(1f)) { Text("Bulk paste") }
+                            }
                             OutlinedTextField(studentSearch, { studentSearch = it }, label = { Text("Pretraži učenika") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(sortSurname, { sortSurname = it })
-                                Text("Sortiraj po prezimenu")
+                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FilterChip(studentFilter == StudentFilter.ACTIVE, { studentFilter = StudentFilter.ACTIVE }, label = { Text("Aktivni") })
+                                FilterChip(studentFilter == StudentFilter.INACTIVE, { studentFilter = StudentFilter.INACTIVE }, label = { Text("Neaktivni") })
+                                FilterChip(studentFilter == StudentFilter.ALL, { studentFilter = StudentFilter.ALL }, label = { Text("Svi") })
+                                FilterChip(sortSurname, { sortSurname = !sortSurname }, label = { Text("Po prezimenu") })
                             }
                             students.forEachIndexed { index, student ->
                                 val stats = classroom.statsFor(student.id)
-                                Row(Modifier.fillMaxWidth().heightIn(min = 38.dp).clickable { onStudent(student.id) }, verticalAlignment = Alignment.CenterVertically) {
-                                    Text("${index + 1}. ${student.name}", Modifier.weight(1f), maxLines = 1)
-                                    Text("${stats.totalAbsences} izost.", style = MaterialTheme.typography.labelSmall)
-                                    if (stats.warning) Text("  ⚠", color = MaterialTheme.colorScheme.error)
-                                    TextButton(onClick = { onDeleteStudent(student.id) }) { Text("×") }
+                                Column(Modifier.fillMaxWidth()) {
+                                    Row(Modifier.fillMaxWidth().heightIn(min = 42.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Column(Modifier.weight(1f).clickable { onStudent(student.id) }) {
+                                            Text("${index + 1}. ${student.name}", maxLines = 1, fontWeight = FontWeight.Medium)
+                                            Text("${stats.totalAbsences} izost. ${if (!student.active) "• neaktivan" else ""}", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                        TextButton(onClick = { renameStudentId = student.id }) { Text("Uredi") }
+                                        TextButton(onClick = { onToggleStudent(student.id) }) { Text(if (student.active) "Isključi" else "Aktiviraj") }
+                                    }
+                                    HorizontalDivider()
                                 }
                             }
                         }
                     }
                 }
             }
+
             item {
                 Text("Nastavni tjedni", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                if (currentWeek != null) Text("Trenutni: tjedan $currentWeek", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                 OutlinedTextField(weekSearch, { weekSearch = it }, label = { Text("Traži tjedan ili datum") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             }
+
             items(weeks) { week ->
                 val sessions = classroom.sessions.filter { it.week == week }.sortedBy { it.lesson }
-                Card(Modifier.fillMaxWidth()) {
+                val isCurrent = currentWeek == week
+                Card(
+                    Modifier.fillMaxWidth(),
+                    colors = if (isCurrent) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer) else CardDefaults.cardColors()
+                ) {
                     Column(Modifier.fillMaxWidth().padding(12.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text("Tjedan $week", fontWeight = FontWeight.Bold)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Tjedan $week", fontWeight = FontWeight.Bold)
+                                    if (isCurrent) Text("  • TRENUTNI", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                                }
                                 Text(classroom.weekRange(week), style = MaterialTheme.typography.bodySmall)
                             }
                             Button(onClick = { onCreateSession(week) }, contentPadding = PaddingValues(horizontal = 12.dp)) { Text("+ čas") }
@@ -313,11 +387,12 @@ private fun ClassroomScreen(
                         if (sessions.isEmpty()) {
                             Text("Nema evidentiranog časa", style = MaterialTheme.typography.bodySmall)
                         } else {
-                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                sessions.forEach { session ->
-                                    OutlinedButton(onClick = { onOpenSession(session.id) }) {
+                            sessions.forEach { session ->
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    OutlinedButton(onClick = { onOpenSession(session.id) }, modifier = Modifier.weight(1f)) {
                                         Text("Čas ${session.lesson} • ${session.date.ifBlank { "datum" }}")
                                     }
+                                    TextButton(onClick = { deleteSessionId = session.id }) { Text("Obriši") }
                                 }
                             }
                         }
@@ -335,6 +410,49 @@ private fun ClassroomScreen(
             text = { OutlinedTextField(name, { name = it }, label = { Text("Ime i prezime") }) },
             confirmButton = { Button(onClick = { onAddStudent(name.trim()); addStudent = false }, enabled = name.isNotBlank()) { Text("Dodaj") } },
             dismissButton = { TextButton(onClick = { addStudent = false }) { Text("Odustani") } }
+        )
+    }
+
+    if (bulkAdd) {
+        var text by remember { mutableStateOf("") }
+        val parsed = text.lines().map { it.trim() }.filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+        AlertDialog(
+            onDismissRequest = { bulkAdd = false },
+            title = { Text("Bulk unos učenika") },
+            text = {
+                Column {
+                    Text("Jedan učenik po redu. Zalijepi listu sa Enterima.")
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(text, { text = it }, modifier = Modifier.fillMaxWidth(), minLines = 8, label = { Text("Ime i prezime") })
+                    Spacer(Modifier.height(6.dp))
+                    Text("Pronađeno: ${parsed.size} učenika", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { Button(onClick = { onBulkAdd(parsed); bulkAdd = false }, enabled = parsed.isNotEmpty()) { Text("Dodaj sve") } },
+            dismissButton = { TextButton(onClick = { bulkAdd = false }) { Text("Odustani") } }
+        )
+    }
+
+    val renameStudent = classroom.students.firstOrNull { it.id == renameStudentId }
+    if (renameStudent != null) {
+        var name by remember(renameStudent.id, renameStudent.name) { mutableStateOf(renameStudent.name) }
+        AlertDialog(
+            onDismissRequest = { renameStudentId = null },
+            title = { Text("Uredi ime učenika") },
+            text = { OutlinedTextField(name, { name = it }, label = { Text("Ime i prezime") }) },
+            confirmButton = { Button(onClick = { onRenameStudent(renameStudent.id, name.trim()); renameStudentId = null }, enabled = name.isNotBlank()) { Text("Sačuvaj") } },
+            dismissButton = { TextButton(onClick = { renameStudentId = null }) { Text("Odustani") } }
+        )
+    }
+
+    val deletingSession = classroom.sessions.firstOrNull { it.id == deleteSessionId }
+    if (deletingSession != null) {
+        AlertDialog(
+            onDismissRequest = { deleteSessionId = null },
+            title = { Text("Obrisati čas?") },
+            text = { Text("Tjedan ${deletingSession.week}, čas ${deletingSession.lesson}. Bit će obrisana i sva evidencija prisustva i komentari za ovaj čas.") },
+            confirmButton = { Button(onClick = { onDeleteSession(deletingSession.id); deleteSessionId = null }) { Text("Obriši") } },
+            dismissButton = { TextButton(onClick = { deleteSessionId = null }) { Text("Odustani") } }
         )
     }
 }
@@ -358,6 +476,7 @@ private fun AttendanceScreen(
     var commentStudentId by remember { mutableStateOf<String?>(null) }
     val summary = classroom.sessionStats(session.id)
     val visibleStudents = classroom.students.filter { student ->
+        if (!student.active) return@filter false
         val entry = classroom.attendance[sessionKey(session.id, student.id)] ?: AttendanceEntry()
         val absentMatch = !onlyAbsent || entry.status in listOf(STATUS_ABSENT, STATUS_EXCUSED, STATUS_UNEXCUSED)
         absentMatch && student.name.contains(search, ignoreCase = true)
@@ -383,7 +502,7 @@ private fun AttendanceScreen(
                 Spacer(Modifier.width(4.dp))
                 FilterChip(selected = onlyAbsent, onClick = { onlyAbsent = !onlyAbsent }, label = { Text("Izostanci") })
             }
-            Text("+ prisutan • − odsutan • O opravdano • N neopravdano • K kasnio • R ranije", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(vertical = 4.dp))
+            Text("+ prisutan • − odsutan • O opravdano • N neopravdano • K kasnio", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(vertical = 4.dp))
             LazyColumn(Modifier.fillMaxSize()) {
                 itemsIndexed(visibleStudents, key = { _, s -> s.id }) { _, student ->
                     val entry = classroom.attendance[sessionKey(session.id, student.id)] ?: AttendanceEntry()
@@ -400,8 +519,7 @@ private fun AttendanceScreen(
                                     STATUS_ABSENT to "−",
                                     STATUS_EXCUSED to "O",
                                     STATUS_UNEXCUSED to "N",
-                                    STATUS_LATE to "K",
-                                    STATUS_LEFT_EARLY to "R"
+                                    STATUS_LATE to "K"
                                 ).forEach { (status, label) ->
                                     CompactStatusButton(label, status, entry.status == status) {
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -488,7 +606,7 @@ private fun ReportsScreen(
                 Card(Modifier.fillMaxWidth().clickable { onStudent(student.id) }) {
                     Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(student.name, fontWeight = FontWeight.Medium)
+                            Text(student.name + if (!student.active) " (neaktivan)" else "", fontWeight = FontWeight.Medium)
                             Text("${s.attendancePercent}% prisustva • ${s.totalAbsences} izostanaka • ${s.unexcused} neopravdanih", style = MaterialTheme.typography.bodySmall)
                         }
                         if (s.warning) Text("⚠", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleLarge)
@@ -512,9 +630,10 @@ private fun StudentProfileScreen(classroom: Classroom, student: Student, onBack:
             item {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        if (!student.active) Text("NEAKTIVAN UČENIK", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                         Text("Prisustvo ${stats.attendancePercent}%", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                         Text("Evidentirano: ${stats.recorded} • Prisutan: ${stats.present} • Izostanci: ${stats.totalAbsences}")
-                        Text("Opravdano: ${stats.excused} • Neopravdano: ${stats.unexcused} • Kasnio: ${stats.late} • Ranije: ${stats.leftEarly}")
+                        Text("Opravdano: ${stats.excused} • Neopravdano: ${stats.unexcused} • Kasnio: ${stats.late}")
                         if (stats.warning) Text("Upozorenje: povećan broj izostanaka", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                     }
                 }
